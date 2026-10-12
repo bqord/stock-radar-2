@@ -218,6 +218,13 @@ def table(df, prices, hist, title, subtitle, accent) -> str:
     </section>"""
 
 
+SKY = "#7FA8C9"
+
+
+def _cagr(eq: pd.Series, years: float) -> float:
+    return float(eq.iloc[-1] ** (1 / years) - 1)
+
+
 def backtest_section(bt: pd.DataFrame) -> str:
     if bt.empty:
         return """
@@ -227,38 +234,63 @@ def backtest_section(bt: pd.DataFrame) -> str:
          <code>python backtest.py --download</code> 을 한 번 실행하면 이 자리에 결과가 들어갑니다.</p>
     </section>"""
 
-    series = {"이 점수 상위 10종목": (bt["strategy_equity"].tolist(), BRASS)}
-    if bt["benchmark_equity"].notna().any():
+    has_uni = "universe_equity" in bt.columns and bt["universe_equity"].notna().any()
+    has_bench = "benchmark_equity" in bt.columns and bt["benchmark_equity"].notna().any()
+    cost = getattr(config, "BACKTEST_COST", 0.003)
+
+    series = {"점수 상위 10종목 (비용 반영)": (bt["strategy_equity"].tolist(), BRASS)}
+    if has_uni:
+        series["유니버스 전체 동일비중"] = (bt["universe_equity"].tolist(), SKY)
+    if has_bench:
         series[f"{config.BENCHMARK} (벤치마크)"] = (bt["benchmark_equity"].tolist(), DIM)
 
     years = max(len(bt) / 12, 0.1)
-    final = bt["strategy_equity"].iloc[-1]
-    cagr = final ** (1 / years) - 1
+    c_s = _cagr(bt["strategy_equity"], years)
     mdd = (bt["strategy_equity"] / bt["strategy_equity"].cummax() - 1).min()
 
-    bench_line = ""
-    if bt["benchmark_equity"].notna().any():
-        bfinal = bt["benchmark_equity"].iloc[-1]
-        bcagr = bfinal ** (1 / years) - 1
-        bench_line = (f'<div><span class="lab">벤치마크 CAGR</span>'
-                      f'<span class="val">{bcagr * 100:+.1f}%</span></div>')
+    stats = [
+        ("기간", f"{years:.1f}년"),
+        ("점수 상위 CAGR", f"{c_s * 100:+.1f}%"),
+    ]
+    c_u = None
+    if has_uni:
+        c_u = _cagr(bt["universe_equity"], years)
+        stats.append(("유니버스 평균 CAGR", f"{c_u * 100:+.1f}%"))
+    if has_bench:
+        stats.append((f"{config.BENCHMARK} CAGR",
+                      f"{_cagr(bt['benchmark_equity'], years) * 100:+.1f}%"))
+    stats.append(("최대낙폭", f"{mdd * 100:.1f}%"))
+    if "turnover" in bt.columns:
+        stats.append(("월 회전율", f"{bt['turnover'].mean() * 100:.0f}%"))
+    stats_html = "".join(
+        f'<div><span class="lab">{html.escape(k)}</span><span class="val">{html.escape(v)}</span></div>'
+        for k, v in stats)
+
+    verdict = ""
+    if c_u is not None:
+        diff = (c_s - c_u) * 100
+        win = float((bt["strategy_return"] > bt["universe_return"]).mean()) * 100
+        if diff > 0:
+            msg = (f"점수 상위 10종목이 같은 유니버스 전체 평균보다 연 {diff:.1f}%p 높았고, "
+                   f"월간 승률은 {win:.0f}%였습니다. 이 차이가 점수가 종목을 골라서 "
+                   f"생긴 효과에 가깝습니다.")
+        else:
+            msg = (f"점수 상위 10종목이 유니버스 전체 평균보다 연 {abs(diff):.1f}%p 낮았습니다. "
+                   f"이 기간에는 점수가 한 일이 없다는 뜻입니다.")
+        verdict = f'<p class="verdict">{msg}</p>'
 
     return f"""
     <section class="block">
       <h3>검증</h3>
       <p class="blocksub">이 점수의 가격 팩터 부분만 과거에 적용해 월말마다 상위 10종목을
-        같은 비중으로 담았다면 어땠는지 계산한 결과입니다.
-        재무 팩터는 과거 값을 구할 수 없어 제외했습니다.</p>
+        같은 비중으로 담았다면 어땠는지 계산한 결과입니다. 매달 바꾼 종목에는
+        왕복 {cost * 100:.1f}% 거래비용을 뺐습니다. 재무 팩터는 과거 값을 구할 수 없어 제외했습니다.</p>
       {dual_chart(series)}
-      <div class="stats">
-        <div><span class="lab">기간</span><span class="val">{years:.1f}년</span></div>
-        <div><span class="lab">누적</span><span class="val">{final:.2f}배</span></div>
-        <div><span class="lab">CAGR</span><span class="val">{cagr * 100:+.1f}%</span></div>
-        {bench_line}
-        <div><span class="lab">최대낙폭</span><span class="val">{mdd * 100:.1f}%</span></div>
-      </div>
-      <p class="warn">거래비용, 세금, 그리고 지금 상장돼 있는 종목만 대상으로 했다는
-        생존 편향이 반영되지 않았습니다. 실제로는 이 수치보다 낮게 나옵니다.</p>
+      <div class="stats">{stats_html}</div>
+      {verdict}
+      <p class="warn">핵심은 점수 상위와 유니버스 평균의 차이입니다. 유니버스가 지금 잘나가는
+        종목 위주라서 생기는 부풀림은 두 선에 똑같이 들어가 이 차이에서 대부분 상쇄됩니다.
+        그래도 한 기간, 한 시장 국면의 결과이고 세금은 빠져 있어 미래 성과를 보장하지 않습니다.</p>
     </section>"""
 
 
@@ -333,6 +365,7 @@ h3 {{ font-size:16px; font-weight:650; margin:0 0 2px; }}
 .stats .lab {{ display:block; color:var(--dim); font-size:11.5px; }}
 .stats .val {{ font-size:17px; font-weight:650; }}
 .warn {{ color:var(--dim); font-size:12px; max-width:68ch; }}
+.verdict {{ font-size:14px; max-width:68ch; margin:6px 0 10px; border-left:3px solid var(--brass); padding-left:10px; }}
 .empty {{ color:var(--dim); font-size:12.5px; }}
 
 footer {{ margin-top:46px; padding-top:16px; border-top:1px solid var(--rule);
