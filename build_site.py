@@ -225,6 +225,29 @@ def _cagr(eq: pd.Series, years: float) -> float:
     return float(eq.iloc[-1] ** (1 / years) - 1)
 
 
+def _compound(r: pd.Series) -> float:
+    return float((1 + r.dropna()).prod() - 1)
+
+
+def yearly_rows(bt: pd.DataFrame):
+    d = bt.copy()
+    d["year"] = d["date"].astype(str).str[:4]
+    rows, wins, n = [], 0, 0
+    for y, g in d.groupby("year"):
+        s = _compound(g["strategy_return"])
+        u = _compound(g["universe_return"])
+        label = y if len(g) >= 12 else f"{y} ({len(g)}개월)"
+        diff = s - u
+        n += 1
+        wins += 1 if diff > 0 else 0
+        cls = "pos" if diff >= 0 else "neg"
+        rows.append(
+            f'<li><span>{label}</span><span>{s * 100:+.0f}%</span>'
+            f'<span>{u * 100:+.0f}%</span>'
+            f'<span class="{cls}">{diff * 100:+.0f}%p</span></li>')
+    return rows, wins, n
+
+
 def backtest_section(bt: pd.DataFrame) -> str:
     if bt.empty:
         return """
@@ -267,17 +290,36 @@ def backtest_section(bt: pd.DataFrame) -> str:
         for k, v in stats)
 
     verdict = ""
+    year_html = ""
     if c_u is not None:
-        diff = (c_s - c_u) * 100
-        win = float((bt["strategy_return"] > bt["universe_return"]).mean()) * 100
-        if diff > 0:
-            msg = (f"점수 상위 10종목이 같은 유니버스 전체 평균보다 연 {diff:.1f}%p 높았고, "
-                   f"월간 승률은 {win:.0f}%였습니다. 이 차이가 점수가 종목을 골라서 "
-                   f"생긴 효과에 가깝습니다.")
+        diff_all = (c_s - c_u) * 100
+        rows, wins, n_years = yearly_rows(bt)
+
+        parts = []
+        if diff_all > 0:
+            parts.append(f"전체 기간에는 점수 상위 10종목이 유니버스 평균보다 연 {diff_all:.1f}%p 높았습니다.")
         else:
-            msg = (f"점수 상위 10종목이 유니버스 전체 평균보다 연 {abs(diff):.1f}%p 낮았습니다. "
-                   f"이 기간에는 점수가 한 일이 없다는 뜻입니다.")
-        verdict = f'<p class="verdict">{msg}</p>'
+            parts.append(f"전체 기간에 점수 상위 10종목이 유니버스 평균보다 연 {abs(diff_all):.1f}%p 낮았습니다.")
+
+        if len(bt) > 36:
+            head = bt.iloc[:-24]
+            yrs_h = len(head) / 12
+            ch_s = (1 + head["strategy_return"]).prod() ** (1 / yrs_h) - 1
+            ch_u = (1 + head["universe_return"].fillna(0)).prod() ** (1 / yrs_h) - 1
+            d_h = (ch_s - ch_u) * 100
+            word = "높았습니다" if d_h > 0 else "낮았습니다"
+            parts.append(f"최근 2년을 빼면 연 {abs(d_h):.1f}%p {word}.")
+
+        parts.append(f"{n_years}개 연도 중 {wins}개 연도에서 유니버스 평균을 이겼습니다.")
+        parts.append("생존 편향은 많이 오른 종목을 고르는 점수 쪽에 더 크게 들어가므로 "
+                     "이 차이는 실제보다 크게 나온 값입니다.")
+        verdict = f'<p class="verdict">{" ".join(parts)}</p>'
+
+        year_html = f"""
+      <ol class="yeartable">
+        <li class="head"><span>연도</span><span>점수 상위</span><span>유니버스 평균</span><span>차이</span></li>
+        {"".join(rows)}
+      </ol>"""
 
     return f"""
     <section class="block">
@@ -288,9 +330,11 @@ def backtest_section(bt: pd.DataFrame) -> str:
       {dual_chart(series)}
       <div class="stats">{stats_html}</div>
       {verdict}
+      {year_html}
       <p class="warn">핵심은 점수 상위와 유니버스 평균의 차이입니다. 유니버스가 지금 잘나가는
-        종목 위주라서 생기는 부풀림은 두 선에 똑같이 들어가 이 차이에서 대부분 상쇄됩니다.
-        그래도 한 기간, 한 시장 국면의 결과이고 세금은 빠져 있어 미래 성과를 보장하지 않습니다.</p>
+        종목 위주라서 생기는 부풀림은 두 선에 들어 있지만, 상위 종목 쪽에 더 크게 들어가므로
+        이 차이도 실제보다 크게 나옵니다. 한 기간, 한 시장 국면의 결과이고 세금은 빠져 있어
+        미래 성과를 보장하지 않습니다.</p>
     </section>"""
 
 
@@ -365,6 +409,14 @@ h3 {{ font-size:16px; font-weight:650; margin:0 0 2px; }}
 .stats .lab {{ display:block; color:var(--dim); font-size:11.5px; }}
 .stats .val {{ font-size:17px; font-weight:650; }}
 .warn {{ color:var(--dim); font-size:12px; max-width:68ch; }}
+.yeartable {{ list-style:none; margin:10px 0 14px; padding:0; max-width:460px; }}
+.yeartable li {{ display:grid; grid-template-columns:1.3fr 1fr 1fr 1fr; gap:8px;
+  padding:6px 0; border-bottom:1px solid var(--rule); font-size:13px; }}
+.yeartable li.head {{ color:var(--dim); font-size:11.5px; }}
+.yeartable li span {{ text-align:right; }}
+.yeartable li span:first-child {{ text-align:left; }}
+.yeartable .pos {{ color:var(--up); font-weight:600; }}
+.yeartable .neg {{ color:var(--down); font-weight:600; }}
 .verdict {{ font-size:14px; max-width:68ch; margin:6px 0 10px; border-left:3px solid var(--brass); padding-left:10px; }}
 .empty {{ color:var(--dim); font-size:12.5px; }}
 
