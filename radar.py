@@ -153,7 +153,12 @@ def price_factors(prices: pd.DataFrame) -> pd.DataFrame:
     out["vol_126"] = daily.tail(126).std() * np.sqrt(252)
 
     out["last_price"] = p.iloc[-1]
-    out["chg_1d"] = p.pct_change().iloc[-1]
+
+    def _last_chg(s):
+        s = s.dropna()
+        return s.iloc[-1] / s.iloc[-2] - 1.0 if len(s) > 1 else np.nan
+
+    out["chg_1d"] = prices.apply(_last_chg)
     return out
 
 
